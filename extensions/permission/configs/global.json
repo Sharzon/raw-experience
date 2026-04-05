@@ -1,0 +1,13 @@
+{
+  "allow": {
+    "read": ["**"],
+    "write": ["**"],
+    "edit": ["**"]
+  },
+  "deny": {
+    "read": [".env", ".ssh/**", "**/*.pem", "**/id_rsa", "**/id_ed25519"],
+    "write": [".ssh/**", "**/*.pem", "package-lock.json", "**/secrets/**"],
+    "edit": [".env", ".ssh/**", "**/*.pem", "**/secrets/**"]
+  },
+  "autoDeny": false
+}

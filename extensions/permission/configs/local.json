@@ -1,0 +1,13 @@
+{
+  "allow": {
+    "read": ["src/**", "tests/**", "docs/**", "*.md"],
+    "write": ["src/**", "tests/**", "docs/**"],
+    "edit": ["src/**"]
+  },
+  "deny": {
+    "read": ["src/secrets/**", "**/credentials.json"],
+    "write": ["src/secrets/**", "**/*.test.ts", "**/*.spec.ts"],
+    "edit": ["src/secrets/**", "tests/**", "**/package.json"]
+  },
+  "autoDeny": false
+}
