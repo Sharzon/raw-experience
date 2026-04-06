@@ -31,8 +31,8 @@ export interface PermissionConfig {
 }
 
 export interface SessionPermissions {
-	allowedPaths: Set<string>;
-	allowedWildcards: Set<string>;
+	allowedPaths: Map<string, Set<PermissionCategory>>;
+	allowedWildcards: Map<string, Set<PermissionCategory>>;
 }
 
 export interface CheckResult {

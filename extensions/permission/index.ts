@@ -67,28 +67,46 @@ export function getPiPackageDir(): string | null {
 
 function createSession(): SessionPermissions {
 	return {
-		allowedPaths: new Set<string>(),
-		allowedWildcards: new Set<string>(),
+		allowedPaths: new Map<string, Set<PermissionCategory>>(),
+		allowedWildcards: new Map<string, Set<PermissionCategory>>(),
 	};
 }
 
-function addSessionPermission(session: SessionPermissions, filePath: string): void {
-	if (filePath.includes("*")) {
-		session.allowedWildcards.add(filePath);
+function addSessionPermission(session: SessionPermissions, filePath: string, category: PermissionCategory): void {
+	const normalizedPath = filePath.replace(/\\/g, "/");
+	
+	if (normalizedPath.includes("*")) {
+		let existing = session.allowedWildcards.get(normalizedPath);
+		if (!existing) {
+			existing = new Set<PermissionCategory>();
+			session.allowedWildcards.set(normalizedPath, existing);
+		}
+		existing.add(category);
 	} else {
-		session.allowedPaths.add(filePath);
+		let existing = session.allowedPaths.get(normalizedPath);
+		if (!existing) {
+			existing = new Set<PermissionCategory>();
+			session.allowedPaths.set(normalizedPath, existing);
+		}
+		existing.add(category);
 	}
 }
 
-function checkSessionPermission(filePath: string, session: SessionPermissions): boolean {
+function checkSessionPermission(filePath: string, category: PermissionCategory, session: SessionPermissions): boolean {
+	const normalizedPath = filePath.replace(/\\/g, "/");
+	
 	// Check exact paths
-	if (session.allowedPaths.has(filePath)) {
+	const exactMatch = session.allowedPaths.get(normalizedPath);
+	if (exactMatch && exactMatch.has(category)) {
 		return true;
 	}
 
 	// Check wildcards
-	for (const pattern of session.allowedWildcards) {
-		if (matchGlob(filePath, pattern)) {
+	for (const [pattern, allowedCategories] of session.allowedWildcards) {
+		if (!allowedCategories.has(category)) {
+			continue; // Skip if this category is not allowed for this pattern
+		}
+		if (matchGlob(normalizedPath, pattern)) {
 			return true;
 		}
 	}
@@ -130,7 +148,7 @@ function checkPath(
 	session: SessionPermissions
 ): CheckResult {
 	// First check session permissions
-	if (checkSessionPermission(filePath, session)) {
+	if (checkSessionPermission(filePath, category, session)) {
 		return { allowed: true, isSessionPermission: true };
 	}
 
@@ -248,7 +266,7 @@ export default async function permissionsExtension(pi: ExtensionAPI): Promise<vo
 				: path.join(currentCwd, filePath);
 
 			// Check if already allowed
-			if (checkSessionPermission(resolvedPath, session)) {
+			if (checkSessionPermission(resolvedPath, action, session)) {
 				return {
 					content: [{ type: "text" as const, text: `Permission already granted for ${resolvedPath}` }],
 					details: {},
@@ -266,7 +284,7 @@ export default async function permissionsExtension(pi: ExtensionAPI): Promise<vo
 			);
 
 			if (confirmed) {
-				addSessionPermission(session, resolvedPath);
+				addSessionPermission(session, resolvedPath, action);
 				return {
 					content: [{ type: "text" as const, text: `Permission granted for ${resolvedPath} (${action})` }],
 					details: {},
@@ -383,8 +401,8 @@ export default async function permissionsExtension(pi: ExtensionAPI): Promise<vo
 				);
 
 				if (confirmed) {
-					addSessionPermission(session, filePath);
-					console.log(`[Permissions] Session permission granted: ${filePath}`);
+					addSessionPermission(session, filePath, category);
+					console.log(`[Permissions] Session permission granted: ${filePath} (${category})`);
 				} else {
 					return {
 						block: true,
