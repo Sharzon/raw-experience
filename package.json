@@ -4,7 +4,10 @@
   "keywords": ["pi-package"],
   "type": "module",
   "pi": {
-    "extensions": ["./extensions/permission/index.ts"]
+    "extensions": [
+      "./extensions/permission/index.ts",
+      "./extensions/get-package-github-url/index.ts"
+    ]
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^1.0.0",
