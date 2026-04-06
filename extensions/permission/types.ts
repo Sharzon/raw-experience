@@ -33,6 +33,10 @@ export interface PermissionConfig {
 export interface SessionPermissions {
 	allowedPaths: Map<string, Set<PermissionCategory>>;
 	allowedWildcards: Map<string, Set<PermissionCategory>>;
+	/** Dynamic allow rules added via events (higher priority than static config) */
+	dynamicAllowRules: Array<{ paths: string[]; actions: PermissionCategory[] }>;
+	/** Dynamic deny rules added via events (higher priority than static config) */
+	dynamicDenyRules: Array<{ paths: string[]; actions: PermissionCategory[] }>;
 }
 
 export interface CheckResult {

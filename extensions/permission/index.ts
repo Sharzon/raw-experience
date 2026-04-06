@@ -28,31 +28,47 @@ import { ExtensionAPI, isToolCallEventType } from "@mariozechner/pi-coding-agent
 import { Type } from "@sinclair/typebox";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import type { PermissionCategory, PermissionConfig, SessionPermissions, CheckResult } from "./types.js";
 import { isPathProtected } from "./types.js";
 import { loadConfigs } from "./config.js";
 import { matchGlob, getMatchingPatterns, compareSpecificity, calcSpecificity, compareSpec, extractPathsFromBash, extractPathsFromGrep, getFilePathFromInput, getCategory } from "./path-matching.js";
 
 // ============================================================================
+// Dynamic Permission Events Types
+// ============================================================================
+
+/** Event payload for raw-experience/permission:allow */
+export interface PermissionAllowEvent {
+	paths: string | string[];
+	actions: ("read" | "write" | "edit")[];
+}
+
+/** Event payload for raw-experience/permission:deny */
+export interface PermissionDenyEvent {
+	paths: string | string[];
+	actions: ("read" | "write" | "edit")[];
+}
+
+// ============================================================================
 // Pi Package Path Discovery
 // ============================================================================
 
 /**
- * Find the pi-coding-agent package directory by walking up from the current
- * working directory and looking for node_modules/@mariozechner/pi-coding-agent
+ * Find the pi-coding-agent package directory.
+ * Uses process.execPath (node binary location) as the base to find node_modules.
+ * This works regardless of the current working directory.
  */
 function findPiPackageDir(): string | null {
-	const cwd = process.cwd();
-	const parts = cwd.split("/");
-
-	for (let i = parts.length; i > 0; i--) {
-		const nodeModulesPath = "/" + [...parts.slice(0, i), "node_modules", "@mariozechner", "pi-coding-agent"].join("/");
-		if (fs.existsSync(nodeModulesPath)) {
-			// Verify it's the right package by checking for package.json
-			const packageJsonPath = path.join(nodeModulesPath, "package.json");
-			if (fs.existsSync(packageJsonPath)) {
-				return nodeModulesPath;
-			}
+	// Get node binary path and go up to find lib/node_modules
+	const nodeDir = path.dirname(process.execPath); // e.g., /Users/.../node/v24.11.1/bin
+	const libDir = path.join(nodeDir, "..", "lib"); // e.g., /Users/.../node/v24.11.1/lib
+	const nodeModulesPath = path.join(libDir, "node_modules", "@mariozechner", "pi-coding-agent");
+	
+	if (fs.existsSync(nodeModulesPath)) {
+		const packageJsonPath = path.join(nodeModulesPath, "package.json");
+		if (fs.existsSync(packageJsonPath)) {
+			return nodeModulesPath;
 		}
 	}
 	return null;
@@ -69,6 +85,8 @@ function createSession(): SessionPermissions {
 	return {
 		allowedPaths: new Map<string, Set<PermissionCategory>>(),
 		allowedWildcards: new Map<string, Set<PermissionCategory>>(),
+		dynamicAllowRules: [],
+		dynamicDenyRules: [],
 	};
 }
 
@@ -122,11 +140,12 @@ function checkSessionPermission(filePath: string, category: PermissionCategory, 
  * Check if access to a path is allowed based on permission rules.
  * 
  * Logic (in order of priority):
- * 1. Session permissions (explicitly granted by user) - always allowed
- * 2. Path is inside current project (cwd) - allowed by default
- * 3. Path matches an allow rule - allowed
- * 4. Path matches a deny rule - denied
- * 5. Otherwise - denied
+ * 1. Dynamic rules (events) - highest priority
+ * 2. Session permissions (explicitly granted by user) - always allowed
+ * 3. Path is inside current project (cwd) - allowed by default
+ * 4. Path matches an allow rule - allowed
+ * 5. Path matches a deny rule - denied
+ * 6. Otherwise - denied
  * 
  * When both allow and deny rules match the path, specificity determines winner:
  * - More specific pattern (smaller file set) wins
@@ -147,14 +166,32 @@ function checkPath(
 	localConfig: PermissionConfig | null,
 	session: SessionPermissions
 ): CheckResult {
-	// First check session permissions
+	const normalizedPath = filePath.replace(/\\/g, "/");
+
+	// 1. Check dynamic rules first (highest priority)
+	const dynamicDenyMatch = session.dynamicDenyRules.find(rule =>
+		rule.actions.includes(category) &&
+		rule.paths.some(p => matchGlob(normalizedPath, p))
+	);
+	if (dynamicDenyMatch) {
+		return { allowed: false, rule: "(dynamic deny rule)", ruleType: "deny" };
+	}
+
+	const dynamicAllowMatch = session.dynamicAllowRules.find(rule =>
+		rule.actions.includes(category) &&
+		rule.paths.some(p => matchGlob(normalizedPath, p))
+	);
+	if (dynamicAllowMatch) {
+		return { allowed: true, rule: "(dynamic allow rule)", ruleType: "allow" };
+	}
+
+	// 2. Check session permissions (explicitly granted by user)
 	if (checkSessionPermission(filePath, category, session)) {
 		return { allowed: true, isSessionPermission: true };
 	}
 
 	// Always allow READ access to pi-coding-agent package (the package itself)
 	// This ensures the permission system can always read its own package files
-	const normalizedPath = filePath.replace(/\\/g, "/");
 	const piPackageDir = findPiPackageDir();
 	if (piPackageDir) {
 		const normalizedPiDir = piPackageDir.replace(/\\/g, "/");
@@ -238,6 +275,134 @@ export default async function permissionsExtension(pi: ExtensionAPI): Promise<vo
 	// Session state
 	const session = createSession();
 	let currentCwd = process.cwd();
+
+	// Check if debug mode is enabled
+	const isDebug = process.env.DEBUG === "true" || process.env.PI_DEBUG === "true";
+
+	// ============================================================================
+	// Local Packages Discovery
+	// ============================================================================
+
+	/**
+	 * Scan the local packages directory and add all cached packages
+	 * to the session's dynamic allow rules.
+	 * This allows reading package code without permission prompts.
+	 */
+	function scanLocalPackages(): void {
+		const packagesDir = path.join(os.homedir(), ".pi", "packages");
+		
+		if (!fs.existsSync(packagesDir)) {
+			return;
+		}
+
+		// Scan JS/TS packages
+		const jsDir = path.join(packagesDir, "JS");
+		if (fs.existsSync(jsDir)) {
+			try {
+				const jsPackages = fs.readdirSync(jsDir);
+				for (const pkg of jsPackages) {
+					const pkgPath = path.join(jsDir, pkg);
+					const stat = fs.statSync(pkgPath);
+					if (stat.isDirectory()) {
+						// Check if it's a scoped package (@scope/name)
+						if (pkg.startsWith("@")) {
+							// For scoped packages, scan inside
+							try {
+								const scopedPackages = fs.readdirSync(pkgPath);
+								for (const scopedPkg of scopedPackages) {
+									const scopedPath = path.join(pkgPath, scopedPkg);
+									const scopedStat = fs.statSync(scopedPath);
+									if (scopedStat.isDirectory()) {
+										session.dynamicAllowRules.push({
+											paths: [scopedPath, `${scopedPath}/**`],
+											actions: ["read"],
+										});
+										if (isDebug) {
+											console.log(`[Permissions] Auto-allowed cached package: ${scopedPath}`);
+										}
+									}
+								}
+							} catch (e) {
+								// Ignore errors reading scoped packages
+							}
+						} else {
+							session.dynamicAllowRules.push({
+								paths: [pkgPath, `${pkgPath}/**`],
+								actions: ["read"],
+							});
+							if (isDebug) {
+								console.log(`[Permissions] Auto-allowed cached package: ${pkgPath}`);
+							}
+						}
+					}
+				}
+			} catch (e) {
+				// Ignore errors reading JS packages dir
+			}
+		}
+
+		// Scan Python packages
+		const pythonDir = path.join(packagesDir, "Python");
+		if (fs.existsSync(pythonDir)) {
+			try {
+				const pythonPackages = fs.readdirSync(pythonDir);
+				for (const pkg of pythonPackages) {
+					const pkgPath = path.join(pythonDir, pkg);
+					const stat = fs.statSync(pkgPath);
+					if (stat.isDirectory()) {
+						session.dynamicAllowRules.push({
+							paths: [pkgPath, `${pkgPath}/**`],
+							actions: ["read"],
+						});
+						if (isDebug) {
+							console.log(`[Permissions] Auto-allowed cached Python package: ${pkgPath}`);
+						}
+					}
+				}
+			} catch (e) {
+				// Ignore errors reading Python packages dir
+			}
+		}
+	}
+
+	// Scan for locally cached packages on startup
+	scanLocalPackages();
+
+	// Subscribe to dynamic permission events from other extensions
+	pi.events.on("raw-experience/permission:allow", (event) => {
+		const permissionEvent = event as PermissionAllowEvent;
+		const paths = Array.isArray(permissionEvent.paths) ? permissionEvent.paths : [permissionEvent.paths];
+		session.dynamicAllowRules.push({
+			paths,
+			actions: permissionEvent.actions,
+		});
+		if (isDebug) {
+			console.log(`[Permissions] Dynamic allow rule added: ${paths.join(", ")} for ${permissionEvent.actions.join(", ")}`);
+		}
+	});
+
+	pi.events.on("raw-experience/permission:deny", (event) => {
+		const permissionEvent = event as PermissionDenyEvent;
+		const paths = Array.isArray(permissionEvent.paths) ? permissionEvent.paths : [permissionEvent.paths];
+		session.dynamicDenyRules.push({
+			paths,
+			actions: permissionEvent.actions,
+		});
+		if (isDebug) {
+			console.log(`[Permissions] Dynamic deny rule added: ${paths.join(", ")} for ${permissionEvent.actions.join(", ")}`);
+		}
+	});
+
+	// Clean up dynamic rules on session shutdown
+	pi.on("session_shutdown", async () => {
+		const allowCount = session.dynamicAllowRules.length;
+		const denyCount = session.dynamicDenyRules.length;
+		session.dynamicAllowRules = [];
+		session.dynamicDenyRules = [];
+		if (isDebug && (allowCount > 0 || denyCount > 0)) {
+			console.log(`[Permissions] Dynamic rules cleared: ${allowCount} allow, ${denyCount} deny`);
+		}
+	});
 
 	// Register request_permission tool
 	pi.registerTool({
@@ -425,7 +590,9 @@ export default async function permissionsExtension(pi: ExtensionAPI): Promise<vo
 			let status = `Global config: ${configs.global ? "loaded" : "not found"}\n`;
 			status += `Local config: ${configs.local ? "loaded" : "not found"}\n`;
 			status += `Session allowed paths: ${session.allowedPaths.size}\n`;
-			status += `Session allowed wildcards: ${session.allowedWildcards.size}`;
+			status += `Session allowed wildcards: ${session.allowedWildcards.size}\n`;
+			status += `Dynamic allow rules: ${session.dynamicAllowRules.length}\n`;
+			status += `Dynamic deny rules: ${session.dynamicDenyRules.length}`;
 
 			ctx.ui.notify(status, "info");
 		},

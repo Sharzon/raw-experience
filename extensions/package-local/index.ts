@@ -20,6 +20,7 @@ import { Type } from "@sinclair/typebox";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import type { PermissionAllowEvent } from "../permission/index.js";
 
 /**
  * Get the default packages directory (~/.pi/packages)
@@ -307,6 +308,15 @@ export default async function packageLocalExtension(pi: ExtensionAPI): Promise<v
 
 				// Clone the repository
 				await cloneRepository(pi, finalGithubUrl, packagePath);
+
+				// Emit permission allow event for the downloaded package
+				// This allows the agent to read the package code without prompting
+				const permissionEvent: PermissionAllowEvent = {
+					paths: [packagePath, `${packagePath}/**`],
+					actions: ["read"],
+				};
+				pi.events.emit("raw-experience/permission:allow", permissionEvent);
+				console.log(`[package-local] Permission allow emitted for: ${packagePath}`);
 
 				const response = {
 					path: packagePath,
