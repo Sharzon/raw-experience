@@ -6,7 +6,8 @@
   "pi": {
     "extensions": [
       "./extensions/permission/index.ts",
-      "./extensions/get-package-github-url/index.ts"
+      "./extensions/get-package-github-url/index.ts",
+      "./extensions/package-local/index.ts"
     ]
   },
   "dependencies": {
