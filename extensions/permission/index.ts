@@ -27,14 +27,43 @@
 import { ExtensionAPI, isToolCallEventType } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import * as path from "node:path";
+import * as fs from "node:fs";
 import type { PermissionCategory, PermissionConfig, SessionPermissions, CheckResult } from "./types.js";
 import { isPathProtected } from "./types.js";
 import { loadConfigs } from "./config.js";
 import { matchGlob, getMatchingPatterns, compareSpecificity, calcSpecificity, compareSpec, extractPathsFromBash, extractPathsFromGrep, getFilePathFromInput, getCategory } from "./path-matching.js";
 
 // ============================================================================
-// Session Management
+// Pi Package Path Discovery
 // ============================================================================
+
+/**
+ * Find the pi-coding-agent package directory by walking up from the current
+ * working directory and looking for node_modules/@mariozechner/pi-coding-agent
+ */
+function findPiPackageDir(): string | null {
+	const cwd = process.cwd();
+	const parts = cwd.split("/");
+
+	for (let i = parts.length; i > 0; i--) {
+		const nodeModulesPath = "/" + [...parts.slice(0, i), "node_modules", "@mariozechner", "pi-coding-agent"].join("/");
+		if (fs.existsSync(nodeModulesPath)) {
+			// Verify it's the right package by checking for package.json
+			const packageJsonPath = path.join(nodeModulesPath, "package.json");
+			if (fs.existsSync(packageJsonPath)) {
+				return nodeModulesPath;
+			}
+		}
+	}
+	return null;
+}
+
+/** Get the pi package directory, or null if not found */
+export function getPiPackageDir(): string | null {
+	return findPiPackageDir();
+}
+
+// Session management
 
 function createSession(): SessionPermissions {
 	return {
@@ -105,8 +134,21 @@ function checkPath(
 		return { allowed: true, isSessionPermission: true };
 	}
 
-	// Normalize paths for comparison
+	// Always allow READ access to pi-coding-agent package (the package itself)
+	// This ensures the permission system can always read its own package files
 	const normalizedPath = filePath.replace(/\\/g, "/");
+	const piPackageDir = findPiPackageDir();
+	if (piPackageDir) {
+		const normalizedPiDir = piPackageDir.replace(/\\/g, "/");
+		if (normalizedPath.startsWith(normalizedPiDir + "/")) {
+			// Only allow read, not write/edit to pi package
+			if (category === "read") {
+				return { allowed: true, rule: "(pi package read allowed)", ruleType: "allow" };
+			}
+		}
+	}
+
+	// Normalize paths for comparison
 	const normalizedCwd = currentCwd.replace(/\\/g, "/");
 
 	// Check if path is inside the current project (cwd)
